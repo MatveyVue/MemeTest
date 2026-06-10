@@ -6,8 +6,7 @@ const NETWORKS = {
 const TONCENTER_API_KEY = '9f2d68b9c97f918c6c3f6143d2036610a2dd335ff323109e8e65e9ba48991bb7';
 
 let currentNetwork = 'testnet';
-let walletConnected = false;
-let telegramUser = null;
+let currentUser = null;
 let selectedMeme = null;
 let activeTab = 'market';
 let tradeDir = 'buy';
@@ -53,21 +52,68 @@ async function toncenterCall(method, params = {}) {
 // ─── Master Wallet Init ──────────────────────────────────
 async function initMasterWallet() {
     if (!MASTER_MNEMONIC || typeof TonWeb === 'undefined' || typeof TonWeb.mnemonic === 'undefined') {
-      console.log('Master wallet not configured');
+      if (MASTER_ADDRESS) {
+        masterAddress = MASTER_ADDRESS;
+        console.log('Master wallet address (from config):', masterAddress);
+        startMasterDepositMonitor();
+      } else {
+        console.log('Master wallet not configured');
+      }
       return;
     }
   try {
     const words = MASTER_MNEMONIC.trim().split(/\s+/);
     if (words.length !== 24) { console.warn('Master mnemonic must be 24 words'); return; }
-    const key = await TonWeb.mnemonic.mnemonicToKeyPair(words);
-    masterKeyPair = key;
+
+    // Try both derivation methods
+    let keyPair = null;
+    try {
+      keyPair = await TonWeb.mnemonic.mnemonicToKeyPair(words);
+    } catch (e) {
+      const seed = await TonWeb.mnemonic.mnemonicToSeed(words);
+      keyPair = TonWeb.utils.nacl.sign.keyPair.fromSeed(seed);
+    }
+    masterKeyPair = keyPair;
     const tonweb = new TonWeb();
-    const wallet = tonweb.wallet.create({ publicKey: key.publicKey, walletVersion: 'v3R2' });
-    masterWallet = wallet;
-    const addr = await wallet.getAddress();
-    masterAddress = addr.toString(false);
-    console.log('Master wallet:', masterAddress);
-    // Start deposit monitoring
+
+    const versions = ['v4R2', 'v4R1', 'v3R2', 'v3R1', 'v2', 'v1'];
+    const workchains = [0, -1];
+    let found = false;
+    for (const ver of versions) {
+      for (const wc of workchains) {
+        const w = tonweb.wallet.create({ publicKey: keyPair.publicKey, walletVersion: ver, workchain: wc });
+        const a = await w.getAddress();
+        const fmtMain = a.toString(true, true, false);
+        const fmtTest = a.toString(true, true, false, true);
+        const fmtBounce = a.toString(true, true, true);
+        console.log(`Wallet ${ver} wc=${wc}: ${fmtMain} (testnet: ${fmtTest}, bounce: ${fmtBounce})`);
+        if (MASTER_ADDRESS) {
+          if (fmtMain === MASTER_ADDRESS || fmtTest === MASTER_ADDRESS || fmtBounce === MASTER_ADDRESS) {
+            masterWallet = w;
+            masterAddress = MASTER_ADDRESS;
+            found = true;
+            console.log('✓ Match found! Using', ver, 'workchain', wc);
+            break;
+          }
+        } else if (!found) {
+          masterWallet = w;
+          masterAddress = fmtTest;
+          found = true;
+        }
+      }
+      if (found) break;
+    }
+
+    if (!found) {
+      if (MASTER_ADDRESS) {
+        console.log('W5 (or custom) wallet — address:', MASTER_ADDRESS);
+        masterAddress = MASTER_ADDRESS;
+      } else {
+        masterAddress = '';
+        masterKeyPair = null;
+      }
+    }
+
     startMasterDepositMonitor();
   } catch (e) {
     console.error('Master wallet init error:', e);
@@ -125,7 +171,7 @@ async function creditUserDeposit(tgId, amountTon, lt) {
     await ref.update({ balance: newBalance, walletHistory: history.slice(-20), updatedAt: Date.now() });
     console.log(`Credited tg_${tgId}: +${amountTon} TON (lt:${lt})`);
     // If this user is currently connected, update their balance
-    if (telegramUser && String(telegramUser.id) === tgId) {
+    if (currentUser && String(currentUser.id) === tgId) {
       tonBalance = newBalance;
       updateWalletUI();
       if (activeTab === 'wallet') renderWalletTab();
@@ -234,8 +280,71 @@ function saveUserData() {
     portfolio: portfolio,
     walletHistory: walletHistory.slice(-20),
     updatedAt: Date.now(),
-    telegram: telegramUser ? { id: telegramUser.id, name: telegramUser.first_name + ' ' + (telegramUser.last_name || ''), username: telegramUser.username } : null
+    telegram: currentUser && currentUser.source === 'telegram' ? { id: currentUser.id, name: currentUser.first_name + ' ' + (currentUser.last_name || ''), username: currentUser.username } : { source: 'anonymous' }
   }).catch(() => {});
+}
+
+// ─── Auto User Detection ────────────────────────────────
+function getOrCreateAnonId() {
+  let id = localStorage.getItem('mfm_anon_id');
+  if (!id) {
+    id = 'anon_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem('mfm_anon_id', id);
+  }
+  return id;
+}
+
+function detectUser() {
+  try {
+    const tg = window.Telegram?.WebApp?.initDataUnsafe;
+    if (tg?.user) {
+      return {
+        source: 'telegram',
+        id: String(tg.user.id),
+        first_name: tg.user.first_name || '',
+        last_name: tg.user.last_name || '',
+        username: tg.user.username || ''
+      };
+    }
+  } catch (e) {}
+  return {
+    source: 'anonymous',
+    id: getOrCreateAnonId(),
+    first_name: 'Anonymous',
+    last_name: '',
+    username: null
+  };
+}
+
+async function ensureUserInFirebase() {
+  if (!firebaseReady || !currentUser) return;
+  const db = firebase.database();
+  const ref = db.ref('users/tg_' + currentUser.id);
+  const snap = await ref.once('value');
+  if (!snap.exists()) {
+    await ref.set({
+      balance: 0,
+      portfolio: {},
+      walletHistory: [],
+      createdAt: Date.now(),
+      telegram: currentUser.source === 'telegram' ? {
+        id: currentUser.id,
+        name: (currentUser.first_name + ' ' + currentUser.last_name).trim(),
+        username: currentUser.username
+      } : null
+    });
+  }
+}
+
+function autoInitUser() {
+  currentUser = detectUser();
+  document.getElementById('walletAddr').textContent = currentUser.source === 'telegram'
+    ? '@' + (currentUser.username || currentUser.first_name)
+    : 'Anonymous';
+  document.getElementById('walletBalance').style.display = 'inline';
+  ensureUserInFirebase().then(() => {
+    loadUserData(currentUser.id);
+  });
 }
 
 // ─── Init App ────────────────────────────────────────────
@@ -243,6 +352,7 @@ initMemes();
 selectedMeme = MEMES[0].id;
 initFirebase();
 initMasterWallet();
+autoInitUser();
 
 setInterval(tickVisuals, 3000);
 
@@ -251,63 +361,6 @@ function startApp() {
 }
 
 startApp();
-
-// ─── Telegram Auth ──────────────────────────────────────
-function onTelegramAuth(user) {
-  telegramUser = user;
-  walletConnected = true;
-  closeTgModal();
-  document.getElementById('walletAddr').textContent = '@' + (user.username || user.first_name);
-  document.getElementById('walletBalance').style.display = 'inline';
-  document.getElementById('connectBtn').textContent = 'Выйти';
-  loadUserData(user.id);
-  updateWalletUI();
-  initTelegramWidget(); // re-init to show logged-in state
-  showToast('Подключён: @' + (user.username || user.first_name));
-}
-window.onTelegramAuth = onTelegramAuth;
-
-function connectTelegramManual() {
-  const input = document.getElementById('tgManualInput');
-  const id = input?.value?.trim();
-  if (!id || isNaN(Number(id))) { showToast('Введите корректный Telegram ID'); return; }
-  telegramUser = { id: Number(id), first_name: 'User', username: id };
-  walletConnected = true;
-  closeTgModal();
-  document.getElementById('walletAddr').textContent = 'tg_' + id;
-  document.getElementById('walletBalance').style.display = 'inline';
-  document.getElementById('connectBtn').textContent = 'Выйти';
-  loadUserData(id);
-  updateWalletUI();
-  showToast('Подключён: tg_' + id);
-}
-
-function closeTgModal() {
-  document.getElementById('tgModal').style.display = 'none';
-}
-
-function initTelegramWidget() {
-  const container = document.getElementById('tg-login-container');
-  if (!container) return;
-  container.innerHTML = '';
-  if (walletConnected && telegramUser) {
-    container.innerHTML = `<div style="padding:12px;color:var(--green);font-size:13px">✅ ${telegramUser.first_name} ${telegramUser.last_name || ''} (@${telegramUser.username || '—'})</div>`;
-    return;
-  }
-  if (TELEGRAM_BOT_USERNAME) {
-    const script = document.createElement('script');
-    script.async = true;
-    script.src = 'https://telegram.org/js/telegram-widget.js?22';
-    script.setAttribute('data-telegram-login', TELEGRAM_BOT_USERNAME);
-    script.setAttribute('data-size', 'large');
-    script.setAttribute('data-onauth', 'onTelegramAuth');
-    script.setAttribute('data-request-access', 'write');
-    container.appendChild(script);
-    document.getElementById('tgFallbackHint').style.display = 'none';
-  } else {
-    container.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:12px">Бот не настроен — введите ID вручную</div>';
-  }
-}
 
 // ─── RENDER: Market ──────────────────────────────────────
 function renderMarket() {
@@ -630,7 +683,7 @@ function drawMainChart(m) {
 
 // ─── EXECUTE TRADE ───────────────────────────────────────
 function executeTrade() {
-  if (!walletConnected) { showToast('Connect wallet first'); return; }
+  if (!currentUser) { showToast('User not initialized'); return; }
   if (!firebaseReady) { showToast('Firebase not connected'); return; }
   const m = MEMES.find(x => x.id === selectedMeme);
   if (!m) { showToast('Select a token'); return; }
@@ -774,7 +827,7 @@ function renderPortfolio() {
 // ─── Wallet ──────────────────────────────────────────────
 function updateWalletUI() {
   const balEl = document.getElementById('walletBalance');
-  if (balEl && walletConnected) balEl.textContent = tonBalance.toFixed(2) + ' TON';
+  if (balEl) balEl.textContent = tonBalance.toFixed(2) + ' TON';
 }
 
 function renderWalletTab() {
@@ -792,16 +845,17 @@ function renderWalletTab() {
     `).join('')
     : '<div style="font-size:11px;color:var(--muted2);text-align:center;padding:12px">No history</div>';
 
-  const tgInfo = telegramUser
-    ? `<div class="wallet-intro" style="padding:4px 0 8px;font-size:12px;color:var(--muted)">
-         Telegram: ${telegramUser.first_name} ${telegramUser.last_name || ''}${telegramUser.username ? ' (@' + telegramUser.username + ')' : ''}
-         <br>Your Comment: <strong style="color:var(--gold);font-family:var(--font-mono)">tg_${telegramUser.id}</strong>
-       </div>`
-    : '';
+  const userLabel = currentUser && currentUser.source === 'telegram'
+    ? `Telegram: ${currentUser.first_name} ${currentUser.last_name || ''}${currentUser.username ? ' (@' + currentUser.username + ')' : ''}`
+    : 'Anonymous';
+  const userInfo = `<div class="wallet-intro" style="padding:4px 0 8px;font-size:12px;color:var(--muted)">
+       ${userLabel}
+       <br>Your Comment: <strong style="color:var(--gold);font-family:var(--font-mono)">tg_${currentUser ? currentUser.id : '?'}</strong>
+     </div>`;
 
   el.innerHTML = `
     <div class="section-label">Wallet</div>
-    ${tgInfo}
+    ${userInfo}
     <div class="wallet-intro">
       <div class="big-balance">${tonBalance.toFixed(2)}</div>
       <div class="bal-label">Balance TON</div>
@@ -823,11 +877,11 @@ function renderWalletTab() {
         Send TON to the <strong>master wallet</strong> address below.<br>
         <strong style="color:var(--gold)">IMPORTANT:</strong> Include your unique comment in the transfer message.
       </div>
-      ${telegramUser ? `
+      ${currentUser ? `
       <div class="field-label">Your Unique Comment</div>
       <div class="addr-display" style="margin-bottom:10px">
-        <span style="color:var(--gold);font-weight:700;font-size:13px">tg_${telegramUser.id}</span>
-        <button class="copy-btn" onclick="copyText('tg_${telegramUser.id}')">Copy</button>
+        <span style="color:var(--gold);font-weight:700;font-size:13px">tg_${currentUser.id}</span>
+        <button class="copy-btn" onclick="copyText('tg_${currentUser.id}')">Copy</button>
       </div>
       ` : ''}
       <div class="field-label">Master Wallet Address (${net.name})</div>
@@ -853,10 +907,10 @@ function renderWalletTab() {
         <div class="td-row"><span class="td-label" style="color:var(--red)">Debited</span><span class="td-val" style="color:var(--red)" id="wdTotal">5.0500 TON</span></div>
         <div class="td-row"><span class="td-label" style="color:var(--green)">Recipient gets</span><span class="td-val" style="color:var(--green)" id="wdReceive">4.9500 TON</span></div>
       </div>
-      <button class="btn-primary" id="withdrawBtn" onclick="executeWithdraw()" ${!walletConnected || !masterWallet ? 'disabled' : ''}>
+      <button class="btn-primary" id="withdrawBtn" onclick="executeWithdraw()" ${!currentUser || (!masterWallet && !masterKeyPair) ? 'disabled' : ''}>
         📤 Confirm Withdraw
       </button>
-      <div style="font-size:10px;color:var(--muted2);text-align:center;margin-top:8px">Signed by master wallet mnemonic</div>
+      <div style="font-size:10px;color:var(--muted2);text-align:center;margin-top:8px">${masterWallet ? 'Signed by master wallet mnemonic' : masterKeyPair ? 'W5 — signed via @ton/ton CDN' : 'W5 withdrawals coming soon'}</div>
     </div>
     <div class="section-label" style="margin-top:12px">Transaction History</div>
     <div class="wallet-card" style="padding:8px 0">${histHtml}</div>
@@ -883,8 +937,9 @@ function updateWithdrawFee() {
 }
 
 async function executeWithdraw() {
-  if (!walletConnected) { showToast('Connect wallet first'); return; }
-  if (!masterWallet || !masterKeyPair) { showToast('Master wallet not configured'); return; }
+  if (!currentUser) { showToast('User not initialized'); return; }
+  if (!masterAddress) { showToast('Master wallet not configured'); return; }
+  if (!masterKeyPair) { showToast('Master key not available'); return; }
   const amt = parseFloat(document.getElementById('withdrawAmt')?.value) || 5;
   const destAddr = document.getElementById('withdrawAddr')?.value?.trim();
   if (!destAddr) { showToast('Enter recipient address'); return; }
@@ -896,21 +951,27 @@ async function executeWithdraw() {
   if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
 
   try {
-    const seqno = await masterWallet.methods.getSeqno().catch(() => 0);
     const amountNano = TonWeb.utils.toNano(String(amt));
+    let result;
 
-    const transfer = masterWallet.methods.transfer({
-      secretKey: masterKeyPair.secretKey,
-      toAddress: destAddr,
-      amount: amountNano,
-      seqno: seqno,
-      payload: '',
-      sendMode: 3,
-    });
-
-    const bocBytes = await transfer.toBoc();
-    const bocBase64 = TonWeb.utils.bytesToBase64(bocBytes);
-    const result = await toncenterCall('sendBoc', { boc: bocBase64 });
+    if (masterWallet) {
+      // v4/v3/v2 wallet via TonWeb
+      const seqno = await masterWallet.methods.getSeqno().catch(() => 0);
+      const transfer = masterWallet.methods.transfer({
+        secretKey: masterKeyPair.secretKey,
+        toAddress: destAddr,
+        amount: amountNano,
+        seqno: seqno,
+        payload: '',
+        sendMode: 3,
+      });
+      const bocBytes = await transfer.toBoc();
+      const bocBase64 = TonWeb.utils.bytesToBase64(bocBytes);
+      result = await toncenterCall('sendBoc', { boc: bocBase64 });
+    } else {
+      // W5 wallet via @ton/ton CDN
+      result = await w5Transfer(destAddr, amt);
+    }
 
     if (result.ok) {
       tonBalance -= total;
@@ -929,30 +990,53 @@ async function executeWithdraw() {
     }
   } catch (e) {
     console.error('Withdraw error:', e);
-    showToast('Withdrawal error');
+    showToast('Withdrawal error: ' + e.message);
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Confirm Withdraw'; }
 }
 
-// ─── CONNECT ─────────────────────────────────────────────
-function connectWallet() {
-  const btn = document.getElementById('connectBtn');
-  if (walletConnected) {
-    walletConnected = false;
-    telegramUser = null;
-    portfolio = {};
-    walletHistory = [];
-    tonBalance = 0;
-    userRef = null;
-    document.getElementById('walletAddr').textContent = 'Not connected';
-    document.getElementById('walletBalance').style.display = 'none';
-    btn.textContent = 'Connect';
-    showToast('Disconnected');
-    return;
+async function w5Transfer(destAddr, amountTon) {
+  let tonMod, coreMod;
+  try {
+    tonMod = await import('https://cdn.jsdelivr.net/npm/@ton/ton@15.3.0/+esm');
+    coreMod = await import('https://cdn.jsdelivr.net/npm/@ton/core@0.61.0/+esm');
+  } catch (e) {
+    console.error('Failed to load TON libraries from CDN', e);
+    return { ok: false, error: 'Failed to load TON libraries' };
   }
-  const modal = document.getElementById('tgModal');
-  modal.style.display = 'flex';
-  initTelegramWidget();
+  const { WalletContractV5R1 } = tonMod;
+  const { Address, Cell } = coreMod;
+
+  const seqnoRes = await toncenterCall('runGetMethod', {
+    address: masterAddress, method: 'seqno', stack: []
+  });
+  let seqno = 0;
+  if (seqnoRes.ok && seqnoRes.result && seqnoRes.result.stack && seqnoRes.result.stack.length > 0) {
+    const item = seqnoRes.result.stack[0];
+    seqno = parseInt(item[1] || item.value || item, 16) || 0;
+  }
+
+  const wallet = WalletContractV5R1.create({
+    workchain: 0,
+    publicKey: masterKeyPair.publicKey,
+  });
+
+  const transfer = wallet.createTransfer({
+    seqno,
+    secretKey: masterKeyPair.secretKey,
+    sendMode: 3,
+    messages: [{
+      to: Address.parse(destAddr),
+      value: String(amountTon),
+      body: new Cell(),
+      bounce: false,
+    }],
+    timeout: Math.floor(Date.now() / 1000) + 600,
+  });
+
+  const bocBytes = transfer.toBoc();
+  const bocBase64 = TonWeb.utils.bytesToBase64(new Uint8Array(bocBytes));
+  return await toncenterCall('sendBoc', { boc: bocBase64 });
 }
 
 // ─── NETWORK ─────────────────────────────────────────────
