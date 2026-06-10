@@ -52,14 +52,14 @@ async function toncenterCall(method, params = {}) {
 
 // ─── Master Wallet Init ──────────────────────────────────
 async function initMasterWallet() {
-  if (!MASTER_MNEMONIC || typeof TonWeb === 'undefined' || typeof TonWebMnemonic === 'undefined') {
-    console.log('Master wallet not configured');
-    return;
-  }
+    if (!MASTER_MNEMONIC || typeof TonWeb === 'undefined' || typeof TonWeb.mnemonic === 'undefined') {
+      console.log('Master wallet not configured');
+      return;
+    }
   try {
     const words = MASTER_MNEMONIC.trim().split(/\s+/);
     if (words.length !== 24) { console.warn('Master mnemonic must be 24 words'); return; }
-    const key = await TonWebMnemonic.mnemonicToKey(words);
+    const key = await TonWeb.mnemonic.mnemonicToKeyPair(words);
     masterKeyPair = key;
     const tonweb = new TonWeb();
     const wallet = tonweb.wallet.create({ publicKey: key.publicKey, walletVersion: 'v3R2' });
