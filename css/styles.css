@@ -729,6 +729,7 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-top: 15px;
 }
 .holding-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; }
 .holding-qty { font-family: var(--font-mono); font-size: 14px; font-weight: 700; margin-top: 2px; }
