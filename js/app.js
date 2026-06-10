@@ -49,6 +49,22 @@ async function toncenterCall(method, params = {}) {
   }
 }
 
+async function toncenterRpc(method, params = {}) {
+  const url = getToncenterUrl() + '/jsonRPC' + (TONCENTER_API_KEY ? '?api_key=' + TONCENTER_API_KEY : '');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
+    });
+    const data = await res.json();
+    if (data.error) return { ok: false, error: data.error.message };
+    return { ok: true, result: data.result ?? data };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ─── Master Wallet Init ──────────────────────────────────
 async function initMasterWallet() {
     if (!MASTER_MNEMONIC || typeof TonWeb === 'undefined' || typeof TonWeb.mnemonic === 'undefined') {
@@ -129,21 +145,27 @@ async function checkMasterDeposits() {
   if (!masterAddress || !firebaseReady) return;
   try {
     const data = await toncenterCall('getTransactions', { address: masterAddress, limit: 20 });
-    if (!data.ok || !data.result) return;
-    // Normalize master address to raw format for comparison
-    let rawMaster = '';
-    try { rawMaster = new TonWeb.Address(masterAddress).toRaw().toLowerCase(); } catch (e) { rawMaster = ''; }
-    if (!rawMaster) return;
+    if (!data.ok || !data.result) { console.log('Toncenter: no data', data?.error); return; }
+    console.log('Toncenter: got', data.result.length, 'txns for', masterAddress);
+    // Build all address format variants for comparison
+    let masterFmts = [];
+    try {
+      const a = new TonWeb.Address(masterAddress, true, true, true);
+      masterFmts = [
+        a.toString(true, true, false, true).toLowerCase(), // non-bounceable testnet
+        a.toString(true, true, true, true).toLowerCase(),  // bounceable testnet
+        a.toString(true, true, false, false).toLowerCase(), // non-bounceable mainnet
+        a.toString(true, true, true, false).toLowerCase(),  // bounceable mainnet
+      ];
+    } catch (e) { console.error('Toncenter: master address parse error', e); return; }
 
     for (const tx of data.result) {
       const lt = tx.transaction_id?.lt;
       if (!lt || lt <= lastProcessedLt) continue;
       const inMsg = tx.in_msg;
       if (inMsg && inMsg.source && inMsg.source !== '') {
-        // Normalize destination address to raw format
-        let rawDest = '';
-        try { rawDest = new TonWeb.Address(inMsg.destination).toRaw().toLowerCase(); } catch (e) { continue; }
-        if (rawDest !== rawMaster) continue;
+        const dest = (inMsg.destination || '').toLowerCase();
+        if (!masterFmts.includes(dest)) continue;
 
         const valueNano = parseInt(inMsg.value) || 0;
         if (valueNano > 0) {
@@ -222,6 +244,12 @@ function initFirebase() {
         });
         return;
       }
+      // Migration: если supply == maxSupply == 100_000, но цена всё ещё INITIAL_PRICE —
+      // значит данные были созданы бажной версией, сбрасываем supply
+      if (data.supply >= data.maxSupply && data.price === CURVE_INITIAL_PRICE) {
+        marketRef.update({ supply: CURVE_INITIAL_SUPPLY });
+        data.supply = CURVE_INITIAL_SUPPLY;
+      }
       applyMarketData(data);
     });
 
@@ -248,9 +276,8 @@ function applyMarketData(data) {
     const now = Date.now();
     m.priceHistory.push({ price: m.price, time: now });
     if (m.priceHistory.length > 2000) m.priceHistory.splice(0, m.priceHistory.length - 1000);
+    refreshCurrentView();
   }
-
-  refreshCurrentView();
 }
 
 // ─── User Data in Firebase ──────────────────────────────
@@ -398,7 +425,7 @@ function renderMemeCard(m, selected) {
       <canvas class="mini-chart-canvas" id="mini-${m.id}" width="400" height="40"></canvas>
     </div>
     <div class="meme-stats">
-      <div class="stat-item"><div class="stat-val">${m.supply.toLocaleString()}</div><div class="stat-lbl">Supply</div></div>
+      <div class="stat-item"><div class="stat-val">${m.maxSupply.toLocaleString()}</div><div class="stat-lbl">Supply</div></div>
       <div class="stat-item"><div class="stat-val">${(m.maxSupply - m.supply).toLocaleString()}</div><div class="stat-lbl">Available</div></div>
       <div class="stat-item"><div class="stat-val">${Math.round(m.price * m.supply).toLocaleString()} TON</div><div class="stat-lbl">Market Cap</div></div>
     </div>
@@ -502,13 +529,13 @@ function renderTradePanel() {
         </div>
         <div class="amount-input-wrap">
           <div class="amount-label">
-            <span>Amount</span>
+            <span id="tradeLabel">${tradeDir === 'buy' ? 'Spend (TON)' : 'Amount'}</span>
             <span>Balance: <span style="color:var(--gold)">${tonBalance.toFixed(2)}</span> TON</span>
           </div>
-          <input class="amount-input" type="number" id="tradeAmt" value="10" min="1" step="1" oninput="updateTradeInfo()">
+          <input class="amount-input" type="number" id="tradeAmt" value="${tradeDir === 'buy' ? '10' : '100'}" min="0" step="${tradeDir === 'buy' ? '0.1' : '1'}" oninput="updateTradeInfo()">
         </div>
         <div class="trade-details" id="tradeDetails">
-          ${tradeDir === 'buy' ? renderBuyDetails(m, 10) : renderSellDetails(m, 10)}
+          ${tradeDir === 'buy' ? renderBuyDetails(m, 10) : renderSellDetails(m, 100)}
         </div>
         <button class="btn-action ${tradeDir === 'buy' ? 'btn-buy-action' : 'btn-sell-action'}" id="actionBtn" onclick="executeTrade()">
           ${tradeDir === 'buy' ? 'Buy ' + m.ticker : 'Sell ' + m.ticker}
@@ -524,25 +551,29 @@ function renderTradePanel() {
   if (m) drawMainChart(m);
 }
 
-function renderBuyDetails(m, amt) {
-  if (amt <= 0) amt = 1;
-  if (m.supply + amt > m.maxSupply) {
+function renderBuyDetails(m, tonSpend) {
+  if (tonSpend <= 0) tonSpend = 1;
+  const totalCost = tonSpend;
+  const cost = (totalCost - 0.01) / (1 + TRADE_FEE);
+  if (cost <= 0) return '<div class="td-row" style="color:var(--red)"><span class="td-label">Amount too small</span></div>';
+  const tokenAmt = costToTokens(m.supply, cost);
+  if (m.supply + tokenAmt > m.maxSupply) {
     return `<div class="td-row" style="color:var(--red)"><span class="td-label">Max Supply reached (${m.maxSupply})</span></div>`;
   }
-  const cost = buyCost(m.supply, amt);
   const fee = cost * TRADE_FEE;
-  const newPrice = bondingPrice(m.supply + amt);
-  const effectivePrice = cost / amt;
+  const newPrice = bondingPrice(m.supply + tokenAmt);
+  const effectivePrice = tokenAmt > 0 ? cost / tokenAmt : 0;
   const slippage = ((newPrice - m.price) / m.price * 100).toFixed(2);
   return `
     <div class="td-row"><span class="td-label">Current Price</span><span class="td-val">${m.price.toFixed(4)} TON</span></div>
+    <div class="td-row"><span class="td-label">You Get</span><span class="td-val" style="color:var(--gold)" id="tokenAmount">${tokenAmt.toFixed(2)} ${m.ticker}</span></div>
     <div class="td-row"><span class="td-label">Avg Price</span><span class="td-val">${effectivePrice.toFixed(4)} TON</span></div>
     <div class="td-row"><span class="td-label">Cost (curve)</span><span class="td-val" style="color:var(--gold)" id="detailCost">${cost.toFixed(4)} TON</span></div>
     <div class="td-row"><span class="td-label">Fee (5%)</span><span class="td-val" style="color:var(--red)">${fee.toFixed(4)} TON</span></div>
-    <div class="td-row"><span class="td-label">Total</span><span class="td-val" style="color:var(--text)">${(cost + fee + 0.01).toFixed(4)} TON</span></div>
+    <div class="td-row"><span class="td-label">Network</span><span class="td-val">0.01 TON</span></div>
+    <div class="td-row"><span class="td-label">Total</span><span class="td-val" style="color:var(--text)">${totalCost.toFixed(4)} TON</span></div>
     <div class="td-row"><span class="td-label">Price After</span><span class="td-val">${newPrice.toFixed(4)} TON</span></div>
-    <div class="td-row"><span class="td-label">Slippage</span><span class="td-val" style="color:${parseFloat(slippage) > 5 ? 'var(--red)' : 'var(--muted)'}">${slippage}%</span></div>
-    <div class="td-row"><span class="td-label">Network</span><span class="td-val">0.01 TON</span></div>`;
+    <div class="td-row"><span class="td-label">Slippage</span><span class="td-val" style="color:${parseFloat(slippage) > 5 ? 'var(--red)' : 'var(--muted)'}">${slippage}%</span></div>`;
 }
 
 function renderSellDetails(m, amt) {
@@ -570,7 +601,8 @@ function renderSellDetails(m, amt) {
 function updateTradeInfo() {
   const m = selectedMeme ? MEMES.find(x => x.id === selectedMeme) : null;
   if (!m) return;
-  const amt = parseInt(document.getElementById('tradeAmt')?.value) || 0;
+  const raw = document.getElementById('tradeAmt')?.value;
+  const amt = parseFloat(raw) || 0;
   const el = document.getElementById('tradeDetails');
   if (el) el.innerHTML = tradeDir === 'buy' ? renderBuyDetails(m, amt) : renderSellDetails(m, amt);
 }
@@ -581,6 +613,13 @@ function setTradeDir(dir) {
   const tabs = document.querySelectorAll('.trade-tab');
   if (dir === 'buy' && tabs[0]) tabs[0].classList.add('active');
   else if (dir === 'sell' && tabs[1]) tabs[1].classList.add('active');
+  const label = document.getElementById('tradeLabel');
+  if (label) label.textContent = dir === 'buy' ? 'Spend (TON)' : 'Amount';
+  const input = document.getElementById('tradeAmt');
+  if (input) {
+    input.step = dir === 'buy' ? '0.1' : '1';
+    input.value = dir === 'buy' ? '10' : '100';
+  }
   const btn = document.getElementById('actionBtn');
   if (btn) {
     const m = selectedMeme ? MEMES.find(x => x.id === selectedMeme) : null;
@@ -693,48 +732,48 @@ function executeTrade() {
   if (!firebaseReady) { showToast('Firebase not connected'); return; }
   const m = MEMES.find(x => x.id === selectedMeme);
   if (!m) { showToast('Select a token'); return; }
-  const amt = parseInt(document.getElementById('tradeAmt')?.value) || 0;
+  const raw = document.getElementById('tradeAmt')?.value;
+  const amt = parseFloat(raw) || 0;
   if (amt <= 0) { showToast('Amount must be > 0'); return; }
 
   if (tradeDir === 'buy') {
-    if (m.supply + amt > m.maxSupply) {
+    const totalCost = amt;
+    const cost = (totalCost - 0.01) / (1 + TRADE_FEE);
+    if (cost <= 0) { showToast('Amount too small'); return; }
+    const tokenAmt = costToTokens(m.supply, cost);
+    if (tokenAmt <= 0) { showToast('Amount too small'); return; }
+    if (m.supply + tokenAmt > m.maxSupply) {
       showToast(`Max Supply (${m.maxSupply}) reached`);
       return;
     }
-    const cost = buyCost(m.supply, amt);
-    const fee = cost * TRADE_FEE;
-    const totalCost = cost + fee + 0.01;
     if (totalCost > tonBalance) {
       showToast(`Insufficient TON. Need: ${totalCost.toFixed(3)}`);
       return;
     }
 
+    const newPrice = bondingPrice(m.supply + tokenAmt);
     marketRef.transaction((current) => {
-      if (!current) return current;
-      const newSupply = current.supply + amt;
-      if (newSupply > current.maxSupply) return;
-      const newPrice = bondingPrice(newSupply);
-      return {
-        ...current,
-        supply: newSupply,
-        price: newPrice,
-        change: parseFloat((current.change + 0.8).toFixed(1)),
-        holders: current.holders + (current.holders < 9999 ? 1 : 0),
-        updatedAt: Date.now()
-      };
+      if (!current) return;
+      const ns = current.supply + tokenAmt;
+      if (ns > current.maxSupply) return;
+      return { supply: ns, price: bondingPrice(ns), change: parseFloat((current.change + 0.8).toFixed(1)), updatedAt: Date.now() };
     }, (error, committed) => {
       if (error || !committed) { showToast('Transaction failed. Try again'); return; }
+      m.supply += tokenAmt;
+      m.price = newPrice;
+      m.priceHistory.push({ price: m.price, time: Date.now() });
+      if (m.priceHistory.length > 2000) m.priceHistory.splice(0, m.priceHistory.length - 1000);
       tonBalance -= totalCost;
-      creditAdminFee(fee);
+      creditAdminFee(cost * TRADE_FEE);
       if (!portfolio[m.id]) portfolio[m.id] = { tokens: 0, avgPrice: m.price };
       const old = portfolio[m.id];
-      old.avgPrice = (old.avgPrice * old.tokens + cost) / (old.tokens + amt);
-      old.tokens += amt;
+      old.avgPrice = (old.avgPrice * old.tokens + cost) / (old.tokens + tokenAmt);
+      old.tokens += tokenAmt;
       tradeCount += 2;
-      tradeVolume += amt;
+      tradeVolume += tokenAmt;
       saveUserData();
       updateWalletUI();
-      showToast(`Bought ${amt} ${m.ticker} for ${cost.toFixed(3)} TON`);
+      showToast(`Bought ${tokenAmt.toFixed(2)} ${m.ticker} for ${cost.toFixed(3)} TON`);
     });
   } else {
     const pos = portfolio[m.id];
@@ -746,20 +785,18 @@ function executeTrade() {
     const fee = ret * TRADE_FEE;
     const totalRet = ret - fee - 0.01;
 
+    const sellNewPrice = bondingPrice(m.supply - amt);
     marketRef.transaction((current) => {
-      if (!current) return current;
-      const newSupply = current.supply - amt;
-      if (newSupply < 1) return;
-      const newPrice = bondingPrice(newSupply);
-      return {
-        ...current,
-        supply: newSupply,
-        price: newPrice,
-        change: parseFloat((current.change - 0.6).toFixed(1)),
-        updatedAt: Date.now()
-      };
+      if (!current) return;
+      const ns = current.supply - amt;
+      if (ns < 1) return;
+      return { supply: ns, price: bondingPrice(ns), change: parseFloat((current.change - 0.6).toFixed(1)), updatedAt: Date.now() };
     }, (error, committed) => {
       if (error || !committed) { showToast('Transaction failed. Try again'); return; }
+      m.supply -= amt;
+      m.price = sellNewPrice;
+      m.priceHistory.push({ price: m.price, time: Date.now() });
+      if (m.priceHistory.length > 2000) m.priceHistory.splice(0, m.priceHistory.length - 1000);
       pos.tokens -= amt;
       tonBalance += totalRet;
       creditAdminFee(fee);
@@ -916,7 +953,7 @@ function renderWalletTab() {
       <button class="btn-primary" id="withdrawBtn" onclick="executeWithdraw()" ${!currentUser || (!masterWallet && !masterKeyPair) ? 'disabled' : ''}>
         📤 Confirm Withdraw
       </button>
-      <div style="font-size:10px;color:var(--muted2);text-align:center;margin-top:8px">${masterWallet ? 'Signed by master wallet mnemonic' : masterKeyPair ? 'W5 — signed via @ton/ton CDN' : 'W5 withdrawals coming soon'}</div>
+      <div style="font-size:10px;color:var(--muted2);text-align:center;margin-top:8px">${masterWallet ? 'Signed by master wallet mnemonic' : masterKeyPair ? 'W5 — signed via @ton/core CDN' : 'W5 withdrawals coming soon'}</div>
     </div>
     <div class="section-label" style="margin-top:12px">Transaction History</div>
     <div class="wallet-card" style="padding:8px 0">${histHtml}</div>
@@ -973,9 +1010,8 @@ async function executeWithdraw() {
       });
       const bocBytes = await transfer.toBoc();
       const bocBase64 = TonWeb.utils.bytesToBase64(bocBytes);
-      result = await toncenterCall('sendBoc', { boc: bocBase64 });
+      result = await toncenterRpc('sendBoc', { boc: bocBase64 });
     } else {
-      // W5 wallet via @ton/ton CDN
       result = await w5Transfer(destAddr, amt);
     }
 
@@ -1002,64 +1038,89 @@ async function executeWithdraw() {
 }
 
 async function w5Transfer(destAddr, amountTon) {
-  let tonMod, coreMod;
+  let coreMod;
   try {
-    tonMod = await import('https://cdn.jsdelivr.net/npm/@ton/ton@15.3.0/+esm');
-    coreMod = await import('https://cdn.jsdelivr.net/npm/@ton/core@0.61.0/+esm');
+    coreMod = await import('https://cdn.jsdelivr.net/npm/@ton/core@0.56.0/+esm');
   } catch (e) {
-    console.error('Failed to load TON libraries from CDN', e);
-    return { ok: false, error: 'Failed to load TON libraries' };
+    console.error('Failed to load @ton/core from CDN', e);
+    return { ok: false, error: 'Failed to load TON library: ' + e.message };
   }
-  const { WalletContractV5R1 } = tonMod;
-  const { Address, Cell, toNano } = coreMod;
+  const { beginCell, Address, Cell, toNano, storeOutList, storeMessage, external } = coreMod;
 
-  const seqnoRes = await toncenterCall('runGetMethod', {
-    address: masterAddress, method: 'seqno', stack: []
-  });
-  let seqno = 0;
-  if (seqnoRes.ok && seqnoRes.result && seqnoRes.result.stack && seqnoRes.result.stack.length > 0) {
-    const item = seqnoRes.result.stack[0];
-    seqno = parseInt(item[1] || item.value || item, 16) || 0;
+  try {
+    const [seqnoRes, widRes] = await Promise.all([
+      toncenterRpc('runGetMethod', { address: masterAddress, method: 'seqno', stack: [] }),
+      toncenterRpc('runGetMethod', { address: masterAddress, method: 'get_subwallet_id', stack: [] })
+    ]);
+
+    let seqno = 0;
+    if (seqnoRes.ok && seqnoRes.result && seqnoRes.result.stack && seqnoRes.result.stack.length > 0) {
+      const raw = (seqnoRes.result.stack[0][1] || seqnoRes.result.stack[0].value || seqnoRes.result.stack[0]).replace('0x','');
+      seqno = parseInt(raw, 16) || 0;
+    }
+
+    let walletId;
+    if (widRes.ok && widRes.result && widRes.result.stack && widRes.result.stack.length > 0) {
+      const raw = (widRes.result.stack[0][1] || widRes.result.stack[0].value || widRes.result.stack[0]).replace('0x','');
+      walletId = parseInt(raw, 16);
+      if (raw.length >= 8 && (parseInt(raw[0], 16) & 8)) walletId -= 0x100000000;
+    } else {
+      const contextCell = beginCell().storeUint(1, 1).storeInt(0, 8).storeUint(0, 8).storeUint(0, 15).endCell();
+      walletId = contextCell.beginParse().loadInt(32) ^ -239;
+    }
+
+    const destAddress = Address.parse(destAddr);
+    const msgRelaxed = {
+      info: {
+        type: 'internal', ihrDisabled: true, bounce: false, bounced: false,
+        src: null, dest: destAddress,
+        value: { coins: toNano(String(amountTon)) },
+        ihrFee: 0n, forwardFee: 0n, createdLt: 0n, createdAt: 0,
+      },
+      body: new Cell(),
+    };
+
+    const outListPacked = beginCell()
+      .store(storeOutList([{ type: 'sendMsg', mode: 3, outMsg: msgRelaxed }]))
+      .endCell();
+
+    const validUntil = Math.floor(Date.now() / 1000) + 300;
+
+    const signingHash = beginCell()
+      .storeUint(0x7369676e, 32)
+      .storeInt(walletId, 32)
+      .storeUint(validUntil, 32)
+      .storeUint(seqno, 32)
+      .storeBit(1).storeRef(outListPacked)
+      .storeBit(0)
+      .endCell()
+      .hash();
+
+    const signature = TonWeb.utils.nacl.sign.detached(new Uint8Array(signingHash), masterKeyPair.secretKey);
+
+    const bodyCell = beginCell()
+      .storeUint(0x7369676e, 32)
+      .storeInt(walletId, 32)
+      .storeUint(validUntil, 32)
+      .storeUint(seqno, 32)
+      .storeBit(1).storeRef(outListPacked)
+      .storeBit(0)
+      .storeBuffer(signature)
+      .endCell();
+
+    const extMsgCell = beginCell()
+      .store(storeMessage(external({ to: Address.parse(masterAddress), body: bodyCell })))
+      .endCell();
+
+    const bocBuffer = extMsgCell.toBoc();
+    const bocBase64 = TonWeb.utils.bytesToBase64(
+      bocBuffer instanceof Uint8Array ? bocBuffer : new Uint8Array(bocBuffer)
+    );
+    return await toncenterRpc('sendBoc', { boc: bocBase64 });
+  } catch (e) {
+    console.error('W5 transfer error:', e);
+    return { ok: false, error: e.message };
   }
-
-  const wallet = WalletContractV5R1.create({
-    workchain: 0,
-    publicKey: masterKeyPair.publicKey,
-  });
-
-  const destAddress = Address.parse(destAddr);
-  const msgRelaxed = {
-    info: {
-      type: 'internal',
-      ihrDisabled: true,
-      bounce: false,
-      bounced: false,
-      src: Address.EMPTY,
-      dest: destAddress,
-      value: { coins: toNano(String(amountTon)) },
-      ihrFee: 0n,
-      fwdFee: 0n,
-      createdLt: 0n,
-      createdAt: 0,
-    },
-    body: new Cell(),
-  };
-
-  const transfer = wallet.createTransfer({
-    seqno,
-    secretKey: masterKeyPair.secretKey,
-    sendMode: 3,
-    messages: [{
-      type: 'sendMsg',
-      mode: 3,
-      outMsg: msgRelaxed,
-    }],
-    timeout: Math.floor(Date.now() / 1000) + 600,
-  });
-
-  const bocBytes = transfer.toBoc();
-  const bocBase64 = TonWeb.utils.bytesToBase64(new Uint8Array(bocBytes));
-  return await toncenterCall('sendBoc', { boc: bocBase64 });
 }
 
 // ─── NETWORK ─────────────────────────────────────────────
