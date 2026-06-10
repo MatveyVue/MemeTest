@@ -7,6 +7,7 @@
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCIjm_PiSp2mUDH5rfjuDT-oDgFq7Am8gc",
   authDomain: "pixelsgift.firebaseapp.com",
+  databaseURL: "https://pixelsgift-default-rtdb.firebaseio.com",
   projectId: "pixelsgift",
   storageBucket: "pixelsgift.firebasestorage.app",
   messagingSenderId: "96389364670",
@@ -21,11 +22,11 @@ const FIREBASE_CONFIG = {
 const TELEGRAM_BOT_USERNAME = 'MememTradingRobot';
 
 // ─── 💰 Master Wallet ────────────────────────────────────
-// Мнемоника мастер-кошелька приложения.
-// Пользователи отправляют TON на этот кошелёк с комментарием = tg_{ID}.
-// Выводы тоже идут с этого кошелька.
-// Создай новый кошелёк или используй существующий (24 слова).
+// Мнемоника для подписи выводов (24 слова).
+// Адрес кошелька, на который пользователи отправляют TON с комментарием = tg_{ID}.
+// Если MASTER_ADDRESS не задан — берётся из мнемоники.
 const MASTER_MNEMONIC = 'cherry end awful cousin burden excite matrix twist practice egg pattern march wait until weather wink coconut over flee task report catch display fruit';
+const MASTER_ADDRESS = '0QBbz6lrdck00jKezlUKQAn1QzV1uOB1uUs5caKFv-m1zxCM';
 
 // ─── Bonding Curve ────────────────────────────────────────
 // price = K * supply ^ EXPONENT
