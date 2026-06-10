@@ -21,12 +21,11 @@
 
   <div class="wallet-bar">
     <div class="wallet-info">
-      <span class="wallet-icon">⛓</span>
-      <span class="wallet-addr" id="walletAddr">Не подключён</span>
+      <span class="wallet-icon">👤</span>
+      <span class="wallet-addr" id="walletAddr">Загрузка...</span>
     </div>
     <div class="wallet-right">
       <span class="balance" id="walletBalance" style="display:none"></span>
-      <button class="connect-btn" id="connectBtn" onclick="connectWallet()">Подключить</button>
     </div>
   </div>
 
@@ -45,21 +44,7 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<!-- Telegram Login Container (hidden by default) -->
-<div class="modal-overlay" id="tgModal" style="display:none">
-  <div class="modal">
-    <div class="modal-title">🔑 Войти через Telegram</div>
-    <div class="modal-desc">Авторизуйтесь через Telegram для доступа к бирже</div>
-    <div id="tg-login-container" style="text-align:center;margin:16px 0;min-height:60px"></div>
-    <div class="modal-hint" id="tgFallbackHint">Введите ваш Telegram ID вручную</div>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <input class="field-input" id="tgManualInput" placeholder="Telegram ID (число)" type="number" style="flex:1">
-      <button class="btn-secondary" style="width:auto;padding:11px 16px" onclick="connectTelegramManual()">OK</button>
-    </div>
-    <button class="btn-secondary" style="margin-top:8px" onclick="closeTgModal()">Отмена</button>
-  </div>
-</div>
-
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tonweb@0.0.64/dist/tonweb.min.js"></script>
