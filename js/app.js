@@ -130,27 +130,33 @@ async function checkMasterDeposits() {
   try {
     const data = await toncenterCall('getTransactions', { address: masterAddress, limit: 20 });
     if (!data.ok || !data.result) return;
-    const masterLower = masterAddress.toLowerCase();
+    // Normalize master address to raw format for comparison
+    let rawMaster = '';
+    try { rawMaster = new TonWeb.Address(masterAddress).toRaw().toLowerCase(); } catch (e) { rawMaster = ''; }
+    if (!rawMaster) return;
+
     for (const tx of data.result) {
       const lt = tx.transaction_id?.lt;
       if (!lt || lt <= lastProcessedLt) continue;
       const inMsg = tx.in_msg;
       if (inMsg && inMsg.source && inMsg.source !== '') {
-        const dest = (inMsg.destination || '').toLowerCase();
-        if (dest === masterLower) {
-          const valueNano = parseInt(inMsg.value) || 0;
-          if (valueNano > 0) {
-            // Extract comment (message body)
-            let comment = '';
-            if (inMsg.msg_data && inMsg.msg_data['@type'] === 'msg.dataText') {
-              try {
-                comment = atob(inMsg.msg_data.text || '');
-              } catch (e) { comment = ''; }
-            }
-            if (comment.startsWith('tg_')) {
-              const tgId = comment.replace('tg_', '');
-              await creditUserDeposit(tgId, valueNano / 1e9, lt);
-            }
+        // Normalize destination address to raw format
+        let rawDest = '';
+        try { rawDest = new TonWeb.Address(inMsg.destination).toRaw().toLowerCase(); } catch (e) { continue; }
+        if (rawDest !== rawMaster) continue;
+
+        const valueNano = parseInt(inMsg.value) || 0;
+        if (valueNano > 0) {
+          // Extract comment (message body)
+          let comment = '';
+          if (inMsg.msg_data && inMsg.msg_data['@type'] === 'msg.dataText') {
+            try {
+              comment = atob(inMsg.msg_data.text || '');
+            } catch (e) { comment = ''; }
+          }
+          if (comment.startsWith('tg_')) {
+            const tgId = comment.replace('tg_', '');
+            await creditUserDeposit(tgId, valueNano / 1e9, lt);
           }
         }
       }
@@ -1005,7 +1011,7 @@ async function w5Transfer(destAddr, amountTon) {
     return { ok: false, error: 'Failed to load TON libraries' };
   }
   const { WalletContractV5R1 } = tonMod;
-  const { Address, Cell } = coreMod;
+  const { Address, Cell, toNano } = coreMod;
 
   const seqnoRes = await toncenterCall('runGetMethod', {
     address: masterAddress, method: 'seqno', stack: []
@@ -1021,15 +1027,32 @@ async function w5Transfer(destAddr, amountTon) {
     publicKey: masterKeyPair.publicKey,
   });
 
+  const destAddress = Address.parse(destAddr);
+  const msgRelaxed = {
+    info: {
+      type: 'internal',
+      ihrDisabled: true,
+      bounce: false,
+      bounced: false,
+      src: Address.EMPTY,
+      dest: destAddress,
+      value: { coins: toNano(String(amountTon)) },
+      ihrFee: 0n,
+      fwdFee: 0n,
+      createdLt: 0n,
+      createdAt: 0,
+    },
+    body: new Cell(),
+  };
+
   const transfer = wallet.createTransfer({
     seqno,
     secretKey: masterKeyPair.secretKey,
     sendMode: 3,
     messages: [{
-      to: Address.parse(destAddr),
-      value: String(amountTon),
-      body: new Cell(),
-      bounce: false,
+      type: 'sendMsg',
+      mode: 3,
+      outMsg: msgRelaxed,
     }],
     timeout: Math.floor(Date.now() / 1000) + 600,
   });
