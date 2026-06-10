@@ -45,6 +45,12 @@ function buyCost(supply, amount) {
   return k * (Math.pow(s2, n + 1) - Math.pow(supply, n + 1)) / (n + 1);
 }
 
+function costToTokens(supply, cost) {
+  const n = CURVE_EXPONENT, k = CURVE_K;
+  const exp = n + 1;
+  return Math.pow(Math.pow(Math.max(supply, 1), exp) + cost * exp / k, 1 / exp) - supply;
+}
+
 function sellReturn(supply, amount) {
   const n = CURVE_EXPONENT, k = CURVE_K;
   const s2 = supply - amount;
@@ -60,7 +66,7 @@ function initMemes() {
     id: 'pepe',
     emoji: '🐸',
     name: 'Pepe Classic',
-    ticker: '$PEPC',
+    ticker: '$PEPE',
     bg: '#1a2e1a',
     color: '#22C55E',
     supply: CURVE_INITIAL_SUPPLY,
