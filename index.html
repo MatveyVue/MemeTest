@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>MemeFutures — Торгуй мемами</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">⟠</div>
+      <div class="logo-text">Meme<span>Futures</span></div>
+    </div>
+    <div class="network-badge net-testnet" id="networkBadge" onclick="toggleNetwork()">
+      <div class="dot dot-test" id="netDot"></div>
+      <span id="netLabel">Testnet</span>
+    </div>
+  </div>
+
+  <div class="wallet-bar">
+    <div class="wallet-info">
+      <span class="wallet-icon">⛓</span>
+      <span class="wallet-addr" id="walletAddr">Не подключён</span>
+    </div>
+    <div class="wallet-right">
+      <span class="balance" id="walletBalance" style="display:none"></span>
+      <button class="connect-btn" id="connectBtn" onclick="connectWallet()">Подключить</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('market',this)">Рынок</div>
+    <div class="tab" onclick="switchTab('trade',this)">Торговля</div>
+    <div class="tab" onclick="switchTab('portfolio',this)">Портфель</div>
+    <div class="tab" onclick="switchTab('wallet',this)">Кошелёк</div>
+  </div>
+
+  <div id="tab-market" class="content scroll-area"></div>
+  <div id="tab-trade" class="content scroll-area" style="display:none"></div>
+  <div id="tab-portfolio" class="content scroll-area" style="display:none"></div>
+  <div id="tab-wallet" class="content scroll-area" style="display:none"></div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Telegram Login Container (hidden by default) -->
+<div class="modal-overlay" id="tgModal" style="display:none">
+  <div class="modal">
+    <div class="modal-title">🔑 Войти через Telegram</div>
+    <div class="modal-desc">Авторизуйтесь через Telegram для доступа к бирже</div>
+    <div id="tg-login-container" style="text-align:center;margin:16px 0;min-height:60px"></div>
+    <div class="modal-hint" id="tgFallbackHint">Введите ваш Telegram ID вручную</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input class="field-input" id="tgManualInput" placeholder="Telegram ID (число)" type="number" style="flex:1">
+      <button class="btn-secondary" style="width:auto;padding:11px 16px" onclick="connectTelegramManual()">OK</button>
+    </div>
+    <button class="btn-secondary" style="margin-top:8px" onclick="closeTgModal()">Отмена</button>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tonweb@0.0.64/dist/tonweb.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tonweb-mnemonic@1.1.0/dist/tonweb-mnemonic.min.js"></script>
+<script src="js/tokens.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
